@@ -20,6 +20,9 @@ The supported API is the module paths below. They will not move without a major 
 Everything else in the package is internal and may be renamed or relocated in any release.
 
 ```text
+nab_resolver.candidate_provider
+                       CandidateHost, CandidateProvider,
+                       CandidateRequirement, PreparedCandidate
 nab_resolver.errors     ResolutionError, ResolutionInvariantError,
                         ResolutionLimitError, ResolutionStalledError,
                         ResolutionTerminatedError
