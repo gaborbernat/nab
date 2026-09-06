@@ -229,7 +229,9 @@ nab_resolver.candidate_provider
 nab_resolver.errors     ResolutionError, ResolutionInvariantError,
                         ResolutionLimitError,
                         ResolutionStalledError, ResolutionTerminatedError
-nab_resolver.priority   compute_tier, is_dominant_culprit
+nab_resolver.priority   CONFLICT_THRESHOLD, CULPRIT_DEMOTE_THRESHOLD,
+                        TIER_AFFECTED, TIER_CULPRIT, TIER_NORMAL,
+                        compute_tier, is_dominant_culprit
 nab_resolver.ranges     Range
 nab_resolver.resolver   BaseProvider, DEFAULT_MAX_ITERATIONS, Resolver,
                         ResolverObserver, ResolverProvider, Solution
