@@ -7,7 +7,7 @@ renamed or relocated in any release.
     nab_resolver.candidate_provider
                            CandidateHost, CandidateProvider,
                            CandidateRequirement, PreparedCandidate
-    nab_resolver.errors     ResolutionError, ResolutionInvariantError,
+    nab_resolver.errors     ProvisionalResolutionError, ResolutionError, ResolutionInvariantError,
                             ResolutionLimitError,
                             ResolutionStalledError, ResolutionTerminatedError
     nab_resolver.priority   CONFLICT_THRESHOLD, CULPRIT_DEMOTE_THRESHOLD,
