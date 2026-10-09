@@ -7501,6 +7501,140 @@ assert not leaked, f"an offline lock loaded {leaked}"
 """
 
 
+class TestResolveTransportCleanup:
+    """Command-owned clients close even when preparation refuses the project."""
+
+    @pytest.mark.parametrize("command", ["lock", "download"])
+    @pytest.mark.parametrize(
+        ("requirements", "selection", "diagnostic"),
+        [
+            ('["demo =>1"]', (), "invalid requirement in [project].dependencies"),
+            ("[]", ("--groups", "typo"), "Dependency group 'typo' not found"),
+        ],
+        ids=["invalid-requirement", "unknown-group"],
+    )
+    def test_preparation_failure_closes_client(
+        self,
+        hermetic_roots: Path,
+        capsys: pytest.CaptureFixture[str],
+        command: str,
+        requirements: str,
+        selection: tuple[str, ...],
+        diagnostic: str,
+    ) -> None:
+        pyproject = _make_pyproject(
+            hermetic_roots,
+            '[project]\nname = "demo"\nversion = "1.0"\n'
+            f"dependencies = {requirements}\n[dependency-groups]\ndev = []\n",
+        )
+        transport = HttpxAsyncTransport(http2=False)
+        factory = (
+            "nab._resolve._make_transport"
+            if command == "lock"
+            else "nab._download._make_transport"
+        )
+        try:
+            with (
+                patch(factory, return_value=transport) as make,
+                patch.object(transport, "get") as get,
+                patch.object(transport, "aclose", wraps=transport.aclose) as close,
+                patch(
+                    "nab_project.resolve.FetchCoordinator", wraps=FetchCoordinator
+                ) as coordinator,
+            ):
+                status = run(
+                    (
+                        command,
+                        str(pyproject),
+                        "--offline",
+                        "--no-cache",
+                        "--http-backend",
+                        "httpx",
+                        *selection,
+                    )
+                )
+
+                assert status == 1
+                captured = capsys.readouterr()
+                assert captured.out == ""
+                assert diagnostic in captured.err
+                assert "Traceback" not in captured.err
+
+                make.assert_called_once_with("httpx")
+                coordinator.assert_not_called()
+                get.assert_not_awaited()
+                close.assert_awaited_once_with()
+                assert transport._client.is_closed
+        finally:
+            asyncio.run(transport.aclose())
+
+    @pytest.mark.parametrize(
+        "fetch_fails", [False, True], ids=["success", "fetch-failure"]
+    )
+    def test_coordinator_keeps_cleanup_on_its_loop(
+        self,
+        hermetic_roots: Path,
+        capsys: pytest.CaptureFixture[str],
+        fetch_fails: bool,
+    ) -> None:
+        requirements = '["demo"]' if fetch_fails else "[]"
+        pyproject = _make_pyproject(
+            hermetic_roots,
+            '[project]\nname = "root"\nversion = "1.0"\n'
+            f"dependencies = {requirements}\n",
+        )
+        transport = HttpxAsyncTransport(http2=False)
+        original_close = transport.aclose
+        close_loops: list[asyncio.AbstractEventLoop] = []
+        request_loops: list[asyncio.AbstractEventLoop] = []
+
+        async def fail_get(url: str, *, headers: dict[str, str] | None = None) -> None:
+            request_loops.append(asyncio.get_running_loop())
+            raise HttpError("request failed")
+
+        async def close_client() -> None:
+            close_loops.append(asyncio.get_running_loop())
+            await original_close()
+
+        try:
+            with (
+                patch("nab._resolve._make_transport", return_value=transport),
+                patch.object(transport, "get", side_effect=fail_get) as get,
+                patch.object(transport, "aclose", side_effect=close_client),
+                patch(
+                    "nab_project.resolve.FetchCoordinator", wraps=FetchCoordinator
+                ) as coordinator,
+            ):
+                status = run(
+                    (
+                        "lock",
+                        str(pyproject),
+                        "--no-cache",
+                        "--http-backend",
+                        "httpx",
+                        "--output",
+                        str(hermetic_roots / "pylock.toml"),
+                    )
+                )
+
+                assert status == int(fetch_fails)
+                if fetch_fails:
+                    assert "request failed" in capsys.readouterr().err
+                    get.assert_awaited_once()
+                    assert request_loops == [close_loops[0]]
+                else:
+                    get.assert_not_awaited()
+                    assert (hermetic_roots / "pylock.toml").is_file()
+
+                coordinator.assert_called_once()
+                assert close_loops
+                assert len(set(close_loops)) == 1
+                assert close_loops[0].is_closed()
+                assert transport._client.is_closed
+        finally:
+            asyncio.run(original_close())
+
+
 class TestResolveTransport:
     """Which transport a resolve is handed, and when it is built."""
 

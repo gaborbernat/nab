@@ -6495,6 +6495,69 @@ class TestProgressReporting:
         observer.on_backjump(3, 1)
 
 
+class TestResolveTransportCleanup:
+    """Setup refusals release the transport before coordinator ownership."""
+
+    @pytest.mark.parametrize("failure", ["build-selection", "duplicate-indexes"])
+    def test_setup_failure_closes_client_inside_running_loop(
+        self, tmp_path: Path, failure: str
+    ) -> None:
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text('[project]\nname = "root"\ndependencies = []\n')
+        build_requirements = failure == "build-selection"
+        inputs = (
+            ResolveInputs()
+            if build_requirements
+            else ResolveInputs(
+                indexes=(
+                    IndexConfig("same", "https://one.invalid/simple/"),
+                    IndexConfig("same", "https://two.invalid/simple/"),
+                )
+            )
+        )
+        expected = (
+            "a build-requirements resolve has no groups or extras"
+            if build_requirements
+            else "duplicate index names"
+        )
+
+        transport = HttpxAsyncTransport(http2=False)
+        original_close = transport.aclose
+        close_loops: list[asyncio.AbstractEventLoop] = []
+
+        async def close_client() -> None:
+            close_loops.append(asyncio.get_running_loop())
+            await original_close()
+
+        async def attempt() -> None:
+            host_loop = asyncio.get_running_loop()
+            with pytest.raises(ValueError, match=expected):
+                resolve_for_targets(
+                    pyproject,
+                    transport,
+                    targets=(ResolveTarget.for_host(),),
+                    inputs=inputs,
+                    groups=("dev",) if build_requirements else (),
+                    build_requirements=build_requirements,
+                )
+
+            assert len(close_loops) == 1
+            assert close_loops[0] is not host_loop
+            assert close_loops[0].is_closed()
+
+        try:
+            with (
+                patch.object(transport, "get") as get,
+                patch.object(transport, "aclose", side_effect=close_client) as close,
+            ):
+                asyncio.run(attempt())
+                get.assert_not_awaited()
+                close.assert_awaited_once_with()
+                assert transport._client.is_closed
+        finally:
+            asyncio.run(original_close())
+
+
 class TestBuildRequirementsResolve:
     """``build_requirements`` swaps the roots for ``[build-system].requires``."""
 
