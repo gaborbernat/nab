@@ -9,7 +9,6 @@ reports when the tier defers.
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -20,6 +19,7 @@ import tomli
 
 from nab._lock import _join_command, _join_for_cmd, _quote_for_cmd
 from nab.cli import run
+from nab_markersets._compat import get_int_max_str_digits
 from nab_project.lockfile import (
     IndexPin,
     SdistArtifact,
@@ -29,6 +29,10 @@ from nab_project.lockfile import (
 from nab_project.resolve import ResolveResult, TargetResult
 from nab_provider._vendor.packaging.version import Version
 from nab_provider.target import ResolveTarget
+
+requires_int_limit = pytest.mark.skipif(
+    get_int_max_str_digits() == 0, reason="requires an enabled integer conversion limit"
+)
 
 V = Version
 
@@ -1012,6 +1016,7 @@ def test_unreadable_requirement_with_changed_envelope_reports_the_parse_error(
     assert "is out of date" not in err
 
 
+@requires_int_limit
 def test_intractable_requirement_marker_reports_the_marker_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1020,7 +1025,7 @@ def test_intractable_requirement_marker_reports_the_marker_error(
     Whether the requirement is active cannot be read here, so the validity
     check treats it as indeterminate rather than as a missing pin.
     """
-    literal = "1" * (sys.get_int_max_str_digits() + 1)
+    literal = "1" * ((get_int_max_str_digits() or 4300) + 1)
     pyproject = _write_pyproject(
         tmp_path,
         '[project]\nname = "proj"\nversion = "0"\ndependencies = ["foo"]\n',
@@ -1040,6 +1045,7 @@ def test_intractable_requirement_marker_reports_the_marker_error(
     assert "is out of date" not in err
 
 
+@requires_int_limit
 def test_intractable_self_ref_marker_reports_the_marker_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1048,7 +1054,7 @@ def test_intractable_self_ref_marker_reports_the_marker_error(
     The refusal stops the pre-resolve read of the project's own requirements,
     so no validity check runs and the resolve reports the marker.
     """
-    literal = "1" * (sys.get_int_max_str_digits() + 1)
+    literal = "1" * ((get_int_max_str_digits() or 4300) + 1)
     body = (
         '[project]\nname = "proj"\nversion = "0"\ndependencies = []\n'
         "[project.optional-dependencies]\n"
@@ -1185,6 +1191,7 @@ def test_non_pep751_precondition(
     mock.assert_not_called()
 
 
+@requires_int_limit
 def test_oversized_requires_python_precondition(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1194,7 +1201,7 @@ def test_oversized_requires_python_precondition(
         '[project]\ndependencies = ["foo"]\n[tool.nab]\nrequires-python = ">=3.10"\n',
     )
     out = tmp_path / "pylock.toml"
-    oversized = "9" * (sys.get_int_max_str_digits() + 1)
+    oversized = "9" * ((get_int_max_str_digits() or 4300) + 1)
     out.write_text(
         'lock-version = "1.0"\n'
         f'requires-python = ">={oversized}"\n'

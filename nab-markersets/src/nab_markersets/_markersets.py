@@ -10,13 +10,13 @@ the tree once per cell.
 from __future__ import annotations
 
 import re
-import sys
 import threading
 import weakref
 from functools import lru_cache
 from itertools import pairwise, product
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, cast
 
+from ._compat import get_int_max_str_digits
 from ._packaging import (
     InvalidMarker,
     InvalidSpecifier,
@@ -123,7 +123,7 @@ def _apply(lhs: str, op: str, rhs: str, key: str) -> bool:
     The int-string limit joins the cache key: a version key parses its operands,
     so a literal that compares under one limit raises under another.
     """
-    return _apply_memoised(lhs, op, rhs, key, sys.get_int_max_str_digits())
+    return _apply_memoised(lhs, op, rhs, key, get_int_max_str_digits())
 
 
 # --------------------------------------------------------------------- version util
@@ -166,7 +166,7 @@ def _oversized_numeric(text: str) -> bool:
     Such a run makes packaging's ``Version`` raise a bare ``ValueError``. A zero
     limit disables the check, so nothing overflows.
     """
-    limit = sys.get_int_max_str_digits()
+    limit = get_int_max_str_digits()
     if not limit:
         return False
     return any(len(run.group()) > limit for run in _DIGIT_RUN.finditer(text))
@@ -675,7 +675,7 @@ def reject_oversized_version_literals(variable: str, literals: Sequence[str]) ->
     ):
         msg = (
             "version literal numeric component exceeds the "
-            f"{sys.get_int_max_str_digits()}-digit parse limit"
+            f"{get_int_max_str_digits()}-digit parse limit"
         )
         raise IntractableMarkerSet(msg)
 
@@ -687,7 +687,7 @@ def _reject_mint_overflow(literals: Sequence[str]) -> None:
     one digit past it: this rejects at the limit, where
     :func:`reject_oversized_version_literals` rejects past it.
     """
-    limit = sys.get_int_max_str_digits()
+    limit = get_int_max_str_digits()
     if limit and any(
         len(run.group()) >= limit
         for literal in literals

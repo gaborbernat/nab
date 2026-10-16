@@ -17,6 +17,7 @@ import weakref
 import pytest
 
 from nab_markersets import errors, markersets
+from nab_markersets._compat import get_int_max_str_digits
 from nab_markersets._packaging import (
     InvalidMarker,
     Marker,
@@ -31,6 +32,10 @@ from nab_markersets._packaging import (
 )
 from nab_markersets.errors import IntractableMarkerSet, UnserializableMarkerSet
 from nab_markersets.markersets import MarkerSet, _markersets, variable_names
+
+requires_int_limit = pytest.mark.skipif(
+    get_int_max_str_digits() == 0, reason="requires an enabled integer conversion limit"
+)
 
 
 def ms(text: str) -> MarkerSet:
@@ -647,6 +652,7 @@ def test_version_tilde_operator_builds() -> None:
     assert ms('python_full_version ~= "3.9"').evaluate({"python_full_version": "3.9.4"})
 
 
+@requires_int_limit
 @pytest.mark.parametrize(
     "text",
     [
@@ -1442,6 +1448,7 @@ def test_guard_does_not_fire_under_default() -> None:
     assert not marker.is_empty()
 
 
+@requires_int_limit
 @pytest.mark.parametrize(
     "text",
     [
@@ -1460,6 +1467,7 @@ def test_guard_oversized_numeric_literal(text: str) -> None:
         marker.is_empty()
 
 
+@requires_int_limit
 @pytest.mark.parametrize("op", ["<", ">=", "=="])
 def test_evaluate_rejects_oversized_literal(op: str) -> None:
     marker = ms(f'python_full_version {op} "' + "9" * 5000 + '"')
@@ -1467,6 +1475,7 @@ def test_evaluate_rejects_oversized_literal(op: str) -> None:
         marker.evaluate({"python_full_version": "3.9"})
 
 
+@requires_int_limit
 @pytest.mark.parametrize("op", ["<", ">=", "=="])
 def test_restrict_rejects_oversized_literal(op: str) -> None:
     marker = ms(f'python_full_version {op} "' + "9" * 5000 + '"')
@@ -1488,6 +1497,7 @@ def test_string_axis_ignores_oversized_numeric_literal() -> None:
     assert not ms('sys_platform == "' + "9" * 5000 + '"').is_empty()
 
 
+@requires_int_limit
 @pytest.mark.parametrize("op", ["<", ">=", "=="])
 def test_evaluate_rejects_oversized_value(op: str) -> None:
     marker = ms(f'python_full_version {op} "3.9"')
@@ -1495,6 +1505,7 @@ def test_evaluate_rejects_oversized_value(op: str) -> None:
         marker.evaluate({"python_full_version": "9" * 5000})
 
 
+@requires_int_limit
 @pytest.mark.parametrize("op", ["<", ">=", "=="])
 def test_restrict_rejects_oversized_value(op: str) -> None:
     marker = ms(f'python_full_version {op} "3.9"')
@@ -1508,11 +1519,18 @@ def test_string_axis_ignores_oversized_numeric_value() -> None:
     assert ms('sys_platform == "linux"').evaluate({"sys_platform": "9" * 5000}) is False
 
 
+requires_int_limit_api = pytest.mark.skipif(
+    not hasattr(sys, "set_int_max_str_digits"),
+    reason="requires the interpreter integer conversion limit API",
+)
+
+
+@requires_int_limit_api
 def test_oversized_literal_allowed_when_int_limit_disabled() -> None:
     # A zero int-string limit disables the interpreter's overflow check, so the
     # literal parses and the guard stands down.
     lit = "1." + "9" * 5000
-    original = sys.get_int_max_str_digits()
+    original = get_int_max_str_digits()
     sys.set_int_max_str_digits(0)
     try:
         assert isinstance(ms(f'python_full_version >= "{lit}"').is_empty(), bool)
@@ -1528,11 +1546,12 @@ def test_apply_memo_reuses_a_repeated_comparison() -> None:
     assert _markersets._apply_memoised.cache_info().hits == hits + 1
 
 
+@requires_int_limit_api
 def test_apply_memo_misses_when_int_limit_changes() -> None:
     # A version comparison parses both operands, so a result memoised under one
     # int-string limit must not be replayed under a limit that forbids the parse.
     lit = "1." + "9" * 5000
-    original = sys.get_int_max_str_digits()
+    original = get_int_max_str_digits()
     sys.set_int_max_str_digits(0)
     try:
         assert _markersets._apply(lit, ">=", "3.9", key="python_full_version") is False
@@ -1543,49 +1562,37 @@ def test_apply_memo_misses_when_int_limit_changes() -> None:
         _markersets._apply(lit, ">=", "3.9", key="python_full_version")
 
 
-def test_mint_overflow_at_parse_limit_reports_complexity() -> None:
+def test_mint_overflow_at_parse_limit_reports_complexity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # A literal whose numeric run is exactly the parse-limit width leaves no
     # room for neighbour minting to increment a component, so decomposition
     # reports the algebra's bounded failure rather than a bare ValueError.
-    original = sys.get_int_max_str_digits()
     limit = 640
-    sys.set_int_max_str_digits(limit)
-    try:
-        marker = ms('python_full_version > "' + "9" * limit + '"')
-        with pytest.raises(IntractableMarkerSet):
-            marker.is_empty()
-        with pytest.raises(IntractableMarkerSet):
-            marker.witness()
-    finally:
-        sys.set_int_max_str_digits(original)
+    monkeypatch.setattr(_markersets, "get_int_max_str_digits", lambda: limit)
+    marker = ms('python_full_version > "' + "9" * limit + '"')
+    with pytest.raises(IntractableMarkerSet):
+        marker.is_empty()
+    with pytest.raises(IntractableMarkerSet):
+        marker.witness()
 
 
-def test_warm_version_pool_does_not_bypass_the_oversized_literal_guard() -> None:
+def test_warm_version_pool_does_not_bypass_the_oversized_literal_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # A store carries its parsed versions across decisions, so a parse taken under
     # a disabled int-string limit outlives that limit. A decision under a limit the
     # literal overruns has to reach the guard rather than the store's copy.
     literal = "1." + "9" * 700
     store = markersets.DecisionStore()
-    original = sys.get_int_max_str_digits()
-
-    sys.set_int_max_str_digits(0)
-    try:
-        assert ms(f'python_full_version >= "{literal}"').is_empty(store=store) is False
-    finally:
-        sys.set_int_max_str_digits(original)
+    monkeypatch.setattr(_markersets, "get_int_max_str_digits", lambda: 0)
+    assert ms(f'python_full_version >= "{literal}"').is_empty(store=store) is False
 
     assert literal in store.versions
 
-    sys.set_int_max_str_digits(640)
-    try:
-        # Both parse-limit guards reject this literal, so the match is on the
-        # oversize guard's own message to pin which one fired.
-        with pytest.raises(
-            IntractableMarkerSet, match="exceeds the 640-digit parse limit"
-        ):
-            ms(f'python_full_version < "{literal}"').is_empty(store=store)
-    finally:
-        sys.set_int_max_str_digits(original)
+    monkeypatch.setattr(_markersets, "get_int_max_str_digits", lambda: 640)
+    with pytest.raises(IntractableMarkerSet, match="exceeds the 640-digit parse limit"):
+        ms(f'python_full_version < "{literal}"').is_empty(store=store)
 
 
 def _nested_alternating(depth: int) -> MarkerSet:

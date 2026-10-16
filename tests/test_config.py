@@ -41,6 +41,7 @@ from nab.config.values import (
     SourceConfigError,
 )
 from nab_index.multi_index import IndexConfig
+from nab_markersets._compat import get_int_max_str_digits
 from nab_project.conflicts import (
     ConflictKind,
     ConflictMember,
@@ -86,6 +87,10 @@ from nab_provider.target import (
 )
 from nab_provider.testing import pkg_override
 from nab_provider.vcs_admission import admit_vcs_url
+
+requires_int_limit = pytest.mark.skipif(
+    get_int_max_str_digits() == 0, reason="requires an enabled integer conversion limit"
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -5704,6 +5709,7 @@ class TestMatrix:
 _PAST_INT_LIMIT = "9" * 5000
 
 
+@requires_int_limit
 class TestDigitRunPastIntLimit:
     """A digit run past CPython's int limit is a config error.
 

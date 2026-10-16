@@ -10,6 +10,7 @@ import sys
 import tarfile
 import urllib.error
 import zipfile
+from email.message import Message
 from pathlib import Path
 from types import ModuleType
 
@@ -40,7 +41,7 @@ def published(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 @pytest.fixture
 def wheel_tree(tmp_path: Path) -> tuple[Path, list[Path]]:
     """Write one metadata-bearing wheel for every release package."""
-    wheels = []
+    wheels: list[Path] = []
     for package in build_dists.PACKAGES:
         stem = package.replace("-", "_")
         directory = tmp_path / package
@@ -334,7 +335,7 @@ def test_missing_file_refreshes_json_on_every_retry(
     sdist, wheel = "nab-0.0.3.tar.gz", "nab-0.0.3-py3-none-any.whl"
     digest = hashlib.sha256(b"built").hexdigest()
     (tmp_path / wheel).write_bytes(b"built")
-    snapshots = [
+    snapshots: list[list[tuple[str, str | None]]] = [
         [(sdist, digest)],
         [(sdist, digest)],
         [(sdist, digest), (wheel, digest)],
@@ -370,7 +371,9 @@ def test_transient_json_failures_are_not_cached(
         calls.append(url)
         if len(calls) == 1:
             if failure == "404":
-                raise urllib.error.HTTPError(url, 404, "pending", None, None)
+                raise urllib.error.HTTPError(
+                    url, 404, "pending", Message(), io.BytesIO()
+                )
             raise urllib.error.URLError("offline")
         return _json_response([("file.whl", "digest")])
 
