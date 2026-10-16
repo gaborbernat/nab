@@ -69,4 +69,3 @@ class ResolutionInvariantError(ResolutionTerminatedError):
 
 class ResolutionStalledError(ResolutionInvariantError):
     """Conflict resolution stopped making progress; its graph is diagnostic."""
-

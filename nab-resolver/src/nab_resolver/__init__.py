@@ -5,8 +5,8 @@ major version bump.  Everything else in the package is internal and may be
 renamed or relocated in any release.
 
     nab_resolver.candidate_provider
-                           CandidateHost, CandidateProvider,
-                           CandidateRequirement, PreparedCandidate
+                            CandidateHost, CandidateProvider,
+                            CandidateRequirement, PreparedCandidate
     nab_resolver.errors     ResolutionError, ResolutionInvariantError,
                             ResolutionLimitError,
                             ResolutionStalledError, ResolutionTerminatedError
