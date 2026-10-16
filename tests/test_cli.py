@@ -62,6 +62,7 @@ from nab_index.httpx_async_transport import HttpxAsyncTransport
 from nab_index.local_index import LocalIndexClient, UnreadableLocalIndexError
 from nab_index.transport import HttpError
 from nab_index.urllib3_async_transport import Urllib3AsyncTransport
+from nab_markersets._compat import get_int_max_str_digits
 from nab_project._testing.coordinator_fake import make_coordinator
 from nab_project.download import DownloadError, DownloadResult
 from nab_project.fetch import DEFAULT_MAX_CONCURRENCY, FetchCoordinator
@@ -97,6 +98,10 @@ from nab_provider.requirements_file import InvalidProjectRequirementError
 from nab_provider.tags import PlatformSpec
 from nab_provider.target import IntractableMarkerError, ResolveTarget, host_environment
 from nab_resolver.errors import ResolutionError
+
+requires_int_limit = pytest.mark.skipif(
+    get_int_max_str_digits() == 0, reason="requires an enabled integer conversion limit"
+)
 
 V = Version
 
@@ -1901,11 +1906,12 @@ class TestLockCommandSpecific:
         )
         assert err.splitlines() == [expected]
 
+    @requires_int_limit
     def test_oversized_marker_version_exits(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A marker literal the algebra refuses exits 1, not a traceback."""
-        literal = "1" * (sys.get_int_max_str_digits() + 1)
+        literal = "1" * ((get_int_max_str_digits() or 4300) + 1)
         pyproject = _make_pyproject(
             tmp_path,
             '[project]\nname = "root"\nversion = "0"\n'
@@ -2663,14 +2669,21 @@ class TestProjectFlagErrors:
         assert not out.exists()
 
     def test_requires_python_digit_run_past_int_limit_names_the_flag(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        oversized_integer: str,
     ) -> None:
         # Version() raises a bare ValueError for a digit run past CPython's
         # int limit, so the flag parse must reject it like any bad value.
         pyproject = _make_pyproject(tmp_path)
         out = tmp_path / "pylock.toml"
         with pytest.raises(SystemExit) as exc:
-            lock(pyproject, output=out, project_requires_python=">=3." + "9" * 5000)
+            lock(
+                pyproject,
+                output=out,
+                project_requires_python=">=3." + oversized_integer,
+            )
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "error: --project-requires-python must be a PEP 440 specifier" in err

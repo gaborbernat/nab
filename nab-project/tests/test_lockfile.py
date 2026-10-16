@@ -16,6 +16,8 @@ from typing import Any, ClassVar
 
 import pytest
 
+from nab_markersets._compat import get_int_max_str_digits
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -109,6 +111,10 @@ from nab_provider.target import (
     slices_from_points,
 )
 from nab_provider.testing import pkg_override
+
+requires_int_limit = pytest.mark.skipif(
+    get_int_max_str_digits() == 0, reason="requires an enabled integer conversion limit"
+)
 
 
 def _target(
@@ -3324,6 +3330,7 @@ class TestBuildTargetLock:
         text = write_lock(_lock_from(lock))
         assert ">=3.6.*" not in text
 
+    @requires_int_limit
     def test_oversized_requires_python_dropped_and_emittable(self) -> None:
         """A digit run past int()'s limit is dropped like a malformed value.
 
@@ -3331,7 +3338,7 @@ class TestBuildTargetLock:
         against it, so this one constructs and ``excluded_by_python`` admits the
         artefact on every Python.
         """
-        oversized = ">=" + "9" * (sys.get_int_max_str_digits() + 1)
+        oversized = ">=" + "9" * ((get_int_max_str_digits() or 4300) + 1)
         provider = _FakeProvider(
             listings={"foo": [(Version("1.0"), _wheel_file(requires_python=oversized))]}
         )
@@ -3351,7 +3358,7 @@ class TestBuildTargetLock:
 
         The check is a conversion, not a length cap.
         """
-        at_limit = ">=" + "9" * sys.get_int_max_str_digits()
+        at_limit = ">=" + "9" * (get_int_max_str_digits() or 4300)
         provider = _FakeProvider(
             listings={"foo": [(Version("1.0"), _wheel_file(requires_python=at_limit))]}
         )
