@@ -257,6 +257,28 @@ def _malformed_group_pyproject(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def python_marker_fetch_port() -> FakeFetchPort:
+    """Serve leaf dependencies on both sides of the Python 3.12 boundary."""
+    return graph_port(
+        (
+            (
+                "foo",
+                "1.0",
+                False,
+                (
+                    'old-leaf; python_full_version < "3.12"',
+                    'new-leaf; python_full_version >= "3.12"',
+                ),
+            ),
+            ("legacy", "1.0", False, ()),
+            ("newer", "1.0", False, ()),
+            ("old-leaf", "1.0", False, ()),
+            ("new-leaf", "1.0", False, ()),
+        )
+    )
+
+
+@pytest.fixture
 def conflict_fetch_port() -> Iterator[FakeFetchPort]:
     """Serve foo 1.0 and 2.0 for conflict-selection resolves."""
     coordinator = make_coordinator(
@@ -1174,25 +1196,12 @@ class TestResolvePyproject:
         assert "foo" in requirements
         assert "windows-only" not in requirements
 
-    @patch("nab_project._resolve.engine.build_target_lock")
-    @patch("nab_project._resolve.engine.Resolver")
-    @patch("nab_project._resolve.engine.Provider")
-    @patch("nab_project.resolve.FetchCoordinator")
     def test_python_version_overlay_keeps_full_version_gated_dep(
         self,
-        mock_coord_cls: MagicMock,
-        mock_provider_cls: MagicMock,
-        mock_resolver_cls: MagicMock,
-        mock_build_lock: MagicMock,
         tmp_path: Path,
+        python_marker_fetch_port: FakeFetchPort,
     ) -> None:
-        """A python_full_version-gated dep follows the declared Python.
-
-        Declaring only ``python = "3.8"`` on a 3.12 host must keep
-        ``legacy; python_full_version < '3.10'``: the resolve targets Python
-        3.8, so the marker holds. The host patch level must not leak in
-        through ``python_full_version``.
-        """
+        """Root and transitive full-version markers follow the target Python."""
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(
             "[project]\n"
@@ -1202,23 +1211,39 @@ class TestResolvePyproject:
             "[tool.nab.environment]\n"
             'python = "3.8"\n',
         )
-        mock_coord_cls.return_value.__enter__ = lambda s: s
-        mock_coord_cls.return_value.__exit__ = MagicMock(return_value=False)
-        mock_resolver_cls.return_value.resolve.return_value = {
-            "foo": V("1.0"),
-            "legacy": V("1.0"),
-        }
+        with (
+            patch(
+                "nab_project.resolve.FetchCoordinator",
+                return_value=nullcontext(python_marker_fetch_port),
+            ),
+            patch.object(
+                Resolver, "resolve", autospec=True, side_effect=Resolver.resolve
+            ) as solver_resolve,
+        ):
+            result = _resolved(
+                pyproject,
+                _FAKE_TRANSPORT,
+                inputs=ResolveInputs(build_policy=BuildPolicy.NEVER),
+                python_version="3.8",
+            )
 
-        _resolved(
-            pyproject,
-            _FAKE_TRANSPORT,
-            inputs=ResolveInputs(build_policy=BuildPolicy.NEVER),
-            python_version="3.8",
-        )
-
-        requirements = _root_ranges(mock_resolver_cls.return_value)
+        requirements = {root.package for root in solver_resolve.call_args.args[1]}
         assert "foo" in requirements
         assert "legacy" in requirements
+
+        assert _pins(result) == {
+            "foo": V("1.0"),
+            "legacy": V("1.0"),
+            "old-leaf": V("1.0"),
+        }
+
+        lock = result.target_results[0].lock
+        assert lock is not None
+        assert {name: pin.version for name, pin in lock.pins.items()} == {
+            "foo": "1.0",
+            "legacy": "1.0",
+            "old-leaf": "1.0",
+        }
 
     @patch("nab_project._resolve.engine.build_target_lock")
     @patch("nab_project._resolve.engine.Resolver")
@@ -1264,31 +1289,38 @@ class TestResolvePyproject:
         requirements = _root_ranges(mock_resolver_cls.return_value)
         assert "linux-only" in requirements
 
-    @patch("nab_project._resolve.engine.build_target_lock")
-    @patch("nab_project._resolve.engine.Resolver")
-    @patch("nab_project._resolve.engine.Provider")
-    @patch("nab_project.resolve.FetchCoordinator")
     def test_root_marker_uses_effective_python(
         self,
-        mock_coord_cls: MagicMock,
-        mock_provider_cls: MagicMock,
-        mock_resolver_cls: MagicMock,
-        mock_build_lock: MagicMock,
         tmp_path: Path,
+        python_marker_fetch_port: FakeFetchPort,
     ) -> None:
-        """``python_version`` in markers reflects the resolve target Python."""
+        """Root and transitive markers use the requested Python version."""
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(
             '[project]\ndependencies = ["foo", "newer; python_version >= \'3.12\'"]\n',
         )
-        mock_coord_cls.return_value.__enter__ = lambda s: s
-        mock_coord_cls.return_value.__exit__ = MagicMock(return_value=False)
-        mock_resolver_cls.return_value.resolve.return_value = {"foo": V("1.0")}
+        with (
+            patch(
+                "nab_project.resolve.FetchCoordinator",
+                return_value=nullcontext(python_marker_fetch_port),
+            ),
+            patch.object(
+                Resolver, "resolve", autospec=True, side_effect=Resolver.resolve
+            ) as solver_resolve,
+        ):
+            result = _resolved(pyproject, _FAKE_TRANSPORT, python_version="3.10.0")
 
-        _resolved(pyproject, _FAKE_TRANSPORT, python_version="3.10.0")
-
-        requirements = _root_ranges(mock_resolver_cls.return_value)
+        requirements = {root.package for root in solver_resolve.call_args.args[1]}
         assert "newer" not in requirements
+
+        assert _pins(result) == {"foo": V("1.0"), "old-leaf": V("1.0")}
+
+        lock = result.target_results[0].lock
+        assert lock is not None
+        assert {name: pin.version for name, pin in lock.pins.items()} == {
+            "foo": "1.0",
+            "old-leaf": "1.0",
+        }
 
     @patch("nab_project._resolve.engine.build_target_lock")
     @patch("nab_project._resolve.engine.Resolver")
