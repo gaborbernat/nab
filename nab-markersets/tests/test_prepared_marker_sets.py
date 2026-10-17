@@ -75,7 +75,7 @@ def test_capacity_keeps_existing_handoffs(
     monkeypatch: pytest.MonkeyPatch,
     conversions: list[str | Marker | ExternalMarker],
 ) -> None:
-    monkeypatch.setattr(conversion_module, "_PREPARED_SET_LIMIT", 2)
+    monkeypatch.setattr(conversion_module, "_PREPARED_MAX_ENTRIES", 2)
     markers = [Marker(f'os_name == "p{index}"') for index in range(3)]
     owner = PreparedMarkerSets()
     for marker in markers:
@@ -92,7 +92,9 @@ def test_total_text_budget_counts_each_distinct_key_once(
 ) -> None:
     first, second, third = (Marker(f'os_name == "p{index}"') for index in range(3))
     monkeypatch.setattr(
-        conversion_module, "_PREPARED_TEXT_LIMIT", len(str(first)) + len(str(second))
+        conversion_module,
+        "_PREPARED_MAX_TOTAL_SOURCE_CHARS",
+        len(str(first)) + len(str(second)),
     )
     owner = PreparedMarkerSets()
     owner.prepare(first)
@@ -366,3 +368,22 @@ assert not converted.evaluate({"sys_platform": "win32"})
         check=False,
     )
     assert done.returncode == 0, done.stderr
+
+
+def test_strings_and_subclasses_keep_fresh_preparation_and_conversion(
+    conversions: list[str | Marker | ExternalMarker],
+) -> None:
+    class Source(str):
+        """A supported string with its concrete type retained at the factory."""
+
+        __slots__ = ()
+
+    owner = PreparedMarkerSets()
+    for source in ('sys_platform == "linux"', Source('sys_platform == "linux"')):
+        prepared = owner.prepare(source)
+        converted = owner.convert(source)
+        assert prepared is not converted
+        assert prepared.evaluate({"sys_platform": "linux"})
+        assert not converted.evaluate({"sys_platform": "win32"})
+    assert len(conversions) == 4
+    assert type(conversions[-1]) is Source

@@ -17,9 +17,9 @@ __all__ = ["MarkerSetCache", "PreparedMarkerSets"]
 _MARKER_CACHE_MAX_ENTRIES = 128
 # Short source literals fit the minimum enabled integer conversion limit.
 _MARKER_CACHE_MAX_SOURCE_CHARS = 256
-_PREPARED_SET_LIMIT = 32
-_PREPARED_TEXT_LIMIT = 65_536
-_PREPARED_LITERAL_LIMIT = 64
+_PREPARED_MAX_ENTRIES = 32
+_PREPARED_MAX_TOTAL_SOURCE_CHARS = 65_536
+_PREPARED_MAX_LITERAL_CHARS = 64
 _QUOTED_LITERAL = re.compile(r"""(?:"[^"]*"|'[^']*')""")
 _NATIVE_MARKER_STR: object = Marker.__str__
 
@@ -73,7 +73,10 @@ class MarkerSetCache:
 
 
 class PreparedMarkerSets:
-    """Hand successful fresh conversions to a consumer within one operation."""
+    """Prepare native marker conversions for reuse within one operation.
+
+    Strings and non-native renderers are converted afresh.
+    """
 
     __slots__ = ("_characters", "_sets")
 
@@ -98,13 +101,13 @@ class PreparedMarkerSets:
         key = (text, limit)
         if (
             key in self._sets
-            or len(self._sets) >= _PREPARED_SET_LIMIT
-            or self._characters + len(text) > _PREPARED_TEXT_LIMIT
+            or len(self._sets) >= _PREPARED_MAX_ENTRIES
+            or self._characters + len(text) > _PREPARED_MAX_TOTAL_SOURCE_CHARS
         ):
             return
         # Check original literals, including any the converted formula folded away.
         if any(
-            match.end() - match.start() - 2 > _PREPARED_LITERAL_LIMIT
+            match.end() - match.start() - 2 > _PREPARED_MAX_LITERAL_CHARS
             for match in _QUOTED_LITERAL.finditer(text)
         ):
             return
