@@ -77,7 +77,7 @@ def test_text_admission_boundary(conversions: list[str | Marker], size: int) -> 
 def test_capacity_keeps_admitted_hits_without_retaining_new_keys(
     monkeypatch: pytest.MonkeyPatch, conversions: list[str | Marker]
 ) -> None:
-    monkeypatch.setattr(conversion_module, "_SHORT_SET_LIMIT", 2)
+    monkeypatch.setattr(conversion_module, "_MARKER_CACHE_MAX_ENTRIES", 2)
     evaluator = MarkerSetCache()
     markers = [Marker(f'os_name == "p{index}"') for index in range(3)]
     for marker in markers:

@@ -13,9 +13,9 @@ if TYPE_CHECKING:
 
 __all__ = ["MarkerSetCache"]
 
-_SHORT_SET_LIMIT = 128
+_MARKER_CACHE_MAX_ENTRIES = 128
 # Short source literals fit the minimum enabled integer conversion limit.
-_SHORT_TEXT_LIMIT = 256
+_MARKER_CACHE_MAX_SOURCE_CHARS = 256
 _NATIVE_MARKER_STR: object = Marker.__str__
 
 
@@ -30,10 +30,9 @@ def _native_marker_text(marker: str | MarkerLike) -> str | None:
 
 
 class MarkerSetCache:
-    """Reuse short native-marker conversions within one operation on one thread.
+    """Reuse short native marker conversions within one operation on one thread.
 
-    Strings and non-native renderers are converted afresh. Evaluation always
-    belongs to the caller and is never cached here.
+    Strings and non-native renderers stay fresh. Evaluate the returned set separately.
     """
 
     __slots__ = ("_sets",)
@@ -49,7 +48,7 @@ class MarkerSetCache:
             return MarkerSet.from_marker(marker)
         key = None
         if (
-            len(text) <= _SHORT_TEXT_LIMIT
+            len(text) <= _MARKER_CACHE_MAX_SOURCE_CHARS
             and "\\" not in text
             and "(" not in text
             and ")" not in text
@@ -62,7 +61,7 @@ class MarkerSetCache:
         if (
             key is not None
             and key[1] == sys.getrecursionlimit()
-            and len(self._sets) < _SHORT_SET_LIMIT
+            and len(self._sets) < _MARKER_CACHE_MAX_ENTRIES
         ):
             self._sets[key] = parsed
         return parsed
