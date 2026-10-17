@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import threading
 import weakref
+from enum import Enum, auto
 from functools import lru_cache
 from itertools import islice, pairwise, product
 from math import prod
@@ -68,6 +69,9 @@ DOMAIN_SET = "set"
 
 _WITNESS_PROBE_MIN_PRODUCT_CELLS = 64
 _WITNESS_PROBE_MAX_CELLS = 4
+_PATTERN_BITS_PER_UNIT = 64
+# Reserve slots for buffer roots, result records and loop temporaries.
+_PATTERN_BUFFER_FIXED_UNITS = 64
 
 # Every variable in packaging's marker grammar, typed to a domain. The twins
 # dispatch as versions yet may hold an arbitrary string, so they also carry the
@@ -1201,20 +1205,19 @@ def _partition_axis(
     return partition_boolean_axis(atoms, max_cells, memo)
 
 
-# ``max_cells`` bounds one decision, the meter a whole simplify. Thread-local and
-# unset outside a simplify, so every other decision stays unmetered.
+# Thread-local work is shared by simplification or bounded row equivalence.
 _work_meter = threading.local()
 
 
 def charge_work(units: int) -> None:
-    """Charge ``units`` of cell work to the running simplify's meter, if any."""
+    """Charge logical work to the current bounded operation, if any."""
     remaining = getattr(_work_meter, "remaining", None)
     if remaining is None:
         return
     remaining -= units
     _work_meter.remaining = remaining
     if remaining < 0:
-        msg = "simplification work exceeds max_work"
+        msg = "marker operation work exceeds max_work"
         raise IntractableMarkerSet(msg)
 
 
@@ -1919,12 +1922,33 @@ def equivalent_within_rows(
     universe: Formula,
     max_cells: int,
     store: Memo | None = None,
+    *,
+    max_work: int | None = None,
 ) -> bool:
-    """Whether two trees agree on every point of ``universe``, decided per row."""
+    """Compare original trees per row, sharing an existing work budget if present."""
     shared = Memo() if store is None else store
-    rows = _decompose_rows(universe, shared)
-    right_by_row = [restrict_tree(right, row.pins) for row in rows]
-    return _rows_equivalent(left, rows, right_by_row, max_cells, shared)
+    previous_work = getattr(_work_meter, "remaining", None)
+    if previous_work is None:
+        _work_meter.remaining = max_work
+    try:
+        left_nodes = _charge_formula_work(left)
+        right_nodes = _charge_formula_work(right)
+        _charge_formula_work(universe)
+        rows = _decompose_rows(universe, shared)
+        if all(
+            isinstance(row.bound, BoolConst) and not row.bound.value for row in rows
+        ):
+            return True
+        result = _independent_rows_equivalent(
+            left, right, rows, left_nodes + right_nodes, max_cells, shared
+        )
+        if result is not None:
+            return result
+        right_by_row = [restrict_tree(right, row.pins) for row in rows]
+        return _rows_equivalent(left, rows, right_by_row, max_cells, shared)
+    finally:
+        if previous_work is None:
+            _work_meter.remaining = previous_work
 
 
 def _dedupe(clauses: list[frozenset[Atom]]) -> list[frozenset[Atom]]:
@@ -2025,6 +2049,13 @@ class _RowPattern(NamedTuple):
     bits: int
 
 
+class _RowStatus(Enum):
+    """Distinguish varying predicates from a refused row admission."""
+
+    VARYING = auto()
+    OVER_CAP = auto()
+
+
 class _CoverCube(NamedTuple):
     """A retained conjunction and the observed patterns it covers."""
 
@@ -2038,6 +2069,14 @@ class _CoverInput(NamedTuple):
     tree: Formula
     atoms: tuple[Atom, ...]
     leaf_count: int
+
+
+class _RowTruth(NamedTuple):
+    """Source columns and the residual universe for one admitted row."""
+
+    columns: tuple[int, ...]
+    within: int
+    size: int
 
 
 def _canonical_cover_atom(atom: Atom) -> Atom:
@@ -2082,12 +2121,14 @@ def _prepare_cover(node: Formula) -> _CoverInput:
     return _CoverInput(node, tuple(sorted(unique, key=_atom_key)), len(leaves))
 
 
-def _charge_formula_work(node: Formula) -> None:
-    """Price traversal and child-stack allocation before preparing a direct cover."""
+def _charge_formula_work(node: Formula) -> int:
+    """Price a raw walk before preparation and return its node count."""
+    nodes = 0
     pending = [node]
     while pending:
         charge_work(1)
         current = pending.pop()
+        nodes += 1
         if isinstance(current, AtomLeaf):
             charge_work(
                 sum(
@@ -2101,19 +2142,20 @@ def _charge_formula_work(node: Formula) -> None:
         elif isinstance(current, (AndNode, OrNode)):
             charge_work(len(current.children))
             pending.extend(current.children)
+    return nodes
 
 
 def _fixed_row_pattern(
     atoms: Sequence[Atom], row: _Row, max_cells: int, store: Memo
-) -> _RowPattern | None:
-    """Return constant predicate values, or None for varying or oversized rows."""
+) -> _RowPattern | _RowStatus:
+    """Return constant predicate values or the reason the row needs another path."""
     charge_work(len(atoms) + 1)
     restricted = [restrict_tree(AtomLeaf(atom), row.pins) for atom in atoms]
     residual = [atom for node in restricted for atom in collect_atoms(node)]
     bound_atoms = collect_atoms(row.bound)
     bound_axes = {atom.axis() for atom in bound_atoms}
     if any(atom.axis() not in bound_axes for atom in residual):
-        return None
+        return _RowStatus.VARYING
 
     partition_atoms = dict.fromkeys((*residual, *bound_atoms))
     try:
@@ -2123,7 +2165,7 @@ def _fixed_row_pattern(
     except IntractableMarkerSet:
         if _work_meter.remaining < 0:
             raise
-        return None
+        return _RowStatus.OVER_CAP
     count = prod(map(len, space.partitions))
     truth, full = _cell_truth_masks(space, count)
     charge_work(count * (len(bound_atoms) + 1))
@@ -2138,7 +2180,7 @@ def _fixed_row_pattern(
         if value == within:
             pattern |= 1 << index
         elif value:
-            return None
+            return _RowStatus.VARYING
     return _RowPattern(nonempty=True, bits=pattern)
 
 
@@ -2199,18 +2241,27 @@ def _factor_clauses(clauses: Sequence[frozenset[Atom]]) -> Formula:
     return make_and([*lead, _disjunction(residual)])
 
 
+def _pattern_truth_columns(
+    atoms: Sequence[Atom], patterns: Sequence[int]
+) -> dict[Atom, int]:
+    """Transpose observed predicate bits into columns for the mask evaluator."""
+    charge_work(len(patterns) * len(atoms))
+    truth = dict.fromkeys(atoms, 0)
+    for index, pattern in enumerate(patterns):
+        for position, atom in enumerate(atoms):
+            if pattern & (1 << position):
+                truth[atom] |= 1 << index
+    return truth
+
+
 def _cover_patterns(
     source: _CoverInput, patterns: AbstractSet[int]
 ) -> list[_CoverCube]:
     """Extract irredundant cubes over the observed predicate patterns."""
     atoms = source.atoms
     size = len(patterns)
-    charge_work(size * (len(atoms) + max(1, size.bit_length())))
-    truth = dict.fromkeys(atoms, 0)
-    for index, pattern_bits in enumerate(sorted(patterns)):
-        for position, atom in enumerate(atoms):
-            if pattern_bits & (1 << position):
-                truth[atom] |= 1 << index
+    charge_work(size * max(1, size.bit_length()))
+    truth = _pattern_truth_columns(atoms, sorted(patterns))
     full = (1 << size) - 1
     charge_work(size * (source.leaf_count + 1))
     selected = _eval_mask(source.tree, truth, full)
@@ -2229,7 +2280,9 @@ def _cover_patterns(
 
 
 def _project_patterns(
-    patterns: AbstractSet[int], atoms: Sequence[Atom], retained: Sequence[Atom]
+    patterns: AbstractSet[int] | Sequence[int],
+    atoms: Sequence[Atom],
+    retained: Sequence[Atom],
 ) -> set[int]:
     """Project every observed pattern onto the predicates a cover retains."""
     charge_work(len(patterns) * (len(atoms) + len(retained) + 1))
@@ -2245,22 +2298,8 @@ def _project_patterns(
     return projected
 
 
-def _fixed_row_cover(
-    source: _CoverInput, rows: Sequence[_Row], max_cells: int, store: Memo
-) -> Formula | None:
-    """Build a stable cover by projecting out predicates the cover no longer uses."""
-    if isinstance(source.tree, BoolConst):
-        return source.tree
-    patterns: set[int] = set()
-    for row in rows:
-        pattern = _fixed_row_pattern(source.atoms, row, max_cells, store)
-        if pattern is None:
-            return None
-        if pattern.nonempty:
-            patterns.add(pattern.bits)
-            if len(patterns) * len(source.atoms) > max_cells:
-                return None
-
+def _stabilize_cover(source: _CoverInput, patterns: AbstractSet[int]) -> Formula:
+    """Extract a stable cover by projecting away discarded predicate columns."""
     while True:
         cubes = _cover_patterns(source, patterns)
         result = _factor_clauses([cube.atoms for cube in cubes])
@@ -2269,6 +2308,173 @@ def _fixed_row_cover(
             return result
         patterns = _project_patterns(patterns, source.atoms, refined.atoms)
         source = refined
+
+
+def _row_cover(
+    source: _CoverInput, rows: Sequence[_Row], max_cells: int, store: Memo
+) -> Formula | None:
+    """Build a stable cover by projecting out predicates the cover no longer uses."""
+    if isinstance(source.tree, BoolConst):
+        return source.tree
+    patterns: set[int] = set()
+    for index, row in enumerate(rows):
+        pattern = _fixed_row_pattern(source.atoms, row, max_cells, store)
+        if pattern is _RowStatus.OVER_CAP:
+            return None
+        if pattern is _RowStatus.VARYING:
+            return _varying_row_cover(
+                source, rows, max_cells, store, start=index, patterns=patterns
+            )
+        if pattern.nonempty:
+            patterns.add(pattern.bits)
+            if len(patterns) * len(source.atoms) > max_cells:
+                return None
+
+    return _stabilize_cover(source, patterns)
+
+
+def _set_axis_work_fits(atoms: list[Atom], max_cells: int) -> bool:
+    """Reject set axes whose required column work already exceeds the cap."""
+    charge_work(len(atoms))
+    for axis, predicates in _atoms_by_axis(atoms).items():
+        if axis[0] == AXIS_SET:
+            names = {atom.literal for atom in predicates}
+            if (1 << len(names)) * len(predicates) > max_cells:
+                return False
+    return True
+
+
+def _row_pattern_columns(
+    atoms: Sequence[Atom],
+    row: _Row,
+    max_cells: int,
+    store: Memo,
+    *,
+    max_buffer_units: int | None = None,
+) -> _RowTruth | None:
+    """Compile a row's source columns and release its temporary lookup map."""
+    charge_work(len(atoms) + 1)
+    restricted = [restrict_tree(AtomLeaf(atom), row.pins) for atom in atoms]
+    residual = [atom for node in restricted for atom in collect_atoms(node)]
+    bound_atoms = collect_atoms(row.bound)
+    charge_work(len(residual) + len(bound_atoms))
+    partition_atoms = list(dict.fromkeys((*residual, *bound_atoms)))
+    if not _set_axis_work_fits(partition_atoms, max_cells):
+        return None
+    try:
+        space = _cell_space(
+            make_and(AtomLeaf(atom) for atom in partition_atoms), max_cells, store
+        )
+    except IntractableMarkerSet:
+        if (getattr(_work_meter, "remaining", None) or 0) < 0:
+            raise
+        return None
+    count = prod(map(len, space.partitions))
+    if count * (len(atoms) + 1) > max_cells:
+        return None
+    # The partition lookup survives while source columns and residual masks form.
+    if (
+        max_buffer_units is not None
+        and 2 * len(partition_atoms)
+        + (len(partition_atoms) + len(atoms) + 3) * _integer_payload_units(count)
+        > max_buffer_units
+    ):
+        return None
+    truth, full = _cell_truth_masks(space, count)
+    charge_work(count * (len(bound_atoms) + 1))
+    within = _eval_mask(row.bound, truth, full)
+    if not within:
+        return _RowTruth((), 0, count)
+    charge_work(count * len(restricted))
+    columns = tuple(_eval_mask(node, truth, full) for node in restricted)
+    return _RowTruth(columns, within, count)
+
+
+def _pattern_buffer_units(
+    *, columns: int, cell_units: int, prefix_units: int, regions: int, existing: int
+) -> int:
+    """Price additional container slots and 64-bit integer payload units."""
+    # Old regions and doubled output need at most three records per input.
+    records = 3 * regions * (3 + cell_units + prefix_units)
+    sets = (existing + 2 * regions) * (1 + prefix_units)
+    temporaries = (columns + 6) * cell_units + 3 * prefix_units
+    return _PATTERN_BUFFER_FIXED_UNITS + columns + records + sets + temporaries
+
+
+def _split_row_patterns(
+    row: _RowTruth, existing: int, max_cells: int
+) -> set[int] | None:
+    """Enumerate every source truth pattern, including source-false witnesses."""
+    if not row.within:
+        return set()
+    cell_units = max(1, (row.size + _PATTERN_BITS_PER_UNIT) // _PATTERN_BITS_PER_UNIT)
+    prefix_units = max(
+        1, (len(row.columns) + _PATTERN_BITS_PER_UNIT - 1) // _PATTERN_BITS_PER_UNIT
+    )
+    minimum = _pattern_buffer_units(
+        columns=len(row.columns),
+        cell_units=cell_units,
+        prefix_units=prefix_units,
+        regions=1,
+        existing=existing,
+    )
+    if minimum > max_cells:
+        return None
+    regions = [(0, row.within)]
+    for position, value in enumerate(row.columns):
+        units = _pattern_buffer_units(
+            columns=len(row.columns),
+            cell_units=cell_units,
+            prefix_units=prefix_units,
+            regions=len(regions),
+            existing=existing,
+        )
+        if units > max_cells:
+            return None
+        charge_work(
+            row.size
+            + len(regions) * (2 * cell_units + 2 * prefix_units + 3)
+            + prefix_units
+        )
+        bit = 1 << position
+        complement = ~value
+        refined = []
+        for prefix, region in regions:
+            positive = region & value
+            negative = region & complement
+            if positive:
+                refined.append((prefix | bit, positive))
+            if negative:
+                refined.append((prefix, negative))
+        regions = refined
+    charge_work(len(regions) * (len(row.columns) + prefix_units + 1))
+    return {prefix for prefix, _ in regions}
+
+
+def _varying_row_cover(
+    source: _CoverInput,
+    rows: Sequence[_Row],
+    max_cells: int,
+    store: Memo,
+    *,
+    start: int,
+    patterns: set[int],
+) -> Formula | None:
+    """Extend the proven constant prefix with patterns from all remaining rows."""
+    independent = _independent_cover(source, rows, max_cells, store)
+    if independent is not None:
+        return independent
+    if not _extend_row_patterns(
+        source.atoms, rows, max_cells, store, start=start, patterns=patterns
+    ):
+        return None
+    result = _stabilize_cover(source, patterns)
+    refined = _prepare_cover(result)
+    if refined.atoms != source.atoms:
+        independent = _independent_cover(refined, rows, max_cells, store)
+        if independent is not None:
+            return independent
+    return result
 
 
 def _simplify_greedy(
@@ -2299,7 +2505,7 @@ def simplify_within(
 ) -> Formula:
     """Return a tree equivalent to ``node`` on every point of ``universe``.
 
-    Rows with constant source predicates admit a direct cover.
+    Admitted row truth patterns allow a direct cover.
     Other inputs use greedy clause and atom removal.
     Neither path guarantees the smallest tree.
 
@@ -2318,15 +2524,336 @@ def simplify_within(
             if isinstance(source.tree, BoolConst)
             else _decompose_rows(universe, shared)
         )
-        direct = _fixed_row_cover(source, rows, max_cells, shared)
+        direct = _row_cover(source, rows, max_cells, shared)
         if direct is not None:
             return direct
         greedy = _simplify_greedy(source.tree, rows, max_cells, shared)
         refined = _prepare_cover(greedy)
         if len(refined.atoms) < len(source.atoms):
-            direct = _fixed_row_cover(refined, rows, max_cells, shared)
+            direct = _row_cover(refined, rows, max_cells, shared)
             if direct is not None:
                 return direct
         return greedy
     finally:
         _work_meter.remaining = previous_work
+
+
+class _FreeSetAxis(NamedTuple):
+    """Predicates on a free set axis and the remaining row predicates."""
+
+    members: tuple[Atom, ...]
+    others: tuple[Atom, ...]
+
+
+def _free_set_axis(atoms: Sequence[Atom], rows: Sequence[_Row]) -> _FreeSetAxis | None:
+    """Find a set domain whose observations can vary independently in every row."""
+    charge_work(len(atoms) + len(rows))
+    members = tuple(atom for atom in atoms if atom.kind == AXIS_SET)
+    axes = {atom.axis() for atom in members}
+    if len(axes) != 1:
+        return None
+    variable = next(iter(axes))[1]
+    for row in rows:
+        _charge_formula_work(row.bound)
+        bound_atoms = collect_atoms(row.bound)
+        charge_work(len(row.pins) + len(bound_atoms))
+        if variable in row.pins or any(
+            atom.variable == variable for atom in bound_atoms
+        ):
+            return None
+    return _FreeSetAxis(members, tuple(atom for atom in atoms if atom.kind != AXIS_SET))
+
+
+def _extend_row_patterns(
+    atoms: Sequence[Atom],
+    rows: Sequence[_Row],
+    max_cells: int,
+    store: Memo,
+    *,
+    start: int,
+    patterns: set[int],
+) -> bool:
+    """Retain all admitted observations, including those making the source false."""
+    for index in range(start, len(rows)):
+        columns = _row_pattern_columns(atoms, rows[index], max_cells, store)
+        if columns is None:
+            return False
+        observed = _split_row_patterns(columns, len(patterns), max_cells)
+        if observed is None:
+            return False
+        patterns.update(observed)
+        if len(patterns) * len(atoms) > max_cells:
+            return False
+        del columns, observed
+    return True
+
+
+def _integer_payload_units(bits: int) -> int:
+    """Price integer payloads, including the carry bit while building a full mask."""
+    return max(1, (bits + _PATTERN_BITS_PER_UNIT) // _PATTERN_BITS_PER_UNIT)
+
+
+def _independent_cover_units(
+    axis: _FreeSetAxis, names: int, assignments: int, scalar_patterns: int
+) -> int:
+    """Bound pattern, sort and column buffers in slots plus integer payload units."""
+    members, others = len(axis.members), len(axis.others)
+    prefix = _integer_payload_units(members)
+    mask = _integer_payload_units(assignments)
+    return (
+        _PATTERN_BUFFER_FIXED_UNITS
+        + members
+        + others
+        + names * (4 + prefix)
+        + assignments * (4 + 2 * prefix)
+        + scalar_patterns * (4 + 2 * _integer_payload_units(others))
+        + 2 * (members + others)
+        + (members + 3) * mask
+        + (others + 3) * _integer_payload_units(scalar_patterns)
+    )
+
+
+def _membership_patterns(
+    axis: _FreeSetAxis, scalar_patterns: int, max_cells: int
+) -> list[int] | None:
+    """Enumerate realizable assignments, keeping opposite tests of one name linked."""
+    count = _set_assignment_count(axis.members, max_cells)
+    if count is None:
+        return None
+    names = count.bit_length() - 1
+    if _independent_cover_units(axis, names, count, scalar_patterns) > max_cells:
+        return None
+    charge_work(count * (len(axis.members) + max(1, count.bit_length())))
+    groups: dict[str, int] = {}
+    negative = 0
+    for index, atom in enumerate(axis.members):
+        groups[atom.literal] = groups.get(atom.literal, 0) | (1 << index)
+        if not atom.positive:
+            negative |= 1 << index
+    patterns: list[int] = [negative]
+    for mask in groups.values():
+        patterns += [pattern ^ mask for pattern in patterns]
+    patterns.sort()
+    return patterns
+
+
+def _set_assignment_count(atoms: Sequence[Atom], max_cells: int) -> int | None:
+    """Admit the powerset's column count before allocating positioned integers."""
+    charge_work(len(atoms))
+    names = {atom.literal for atom in atoms}
+    if len(names) >= max_cells.bit_length():
+        return None
+    count = 1 << len(names)
+    return count if count * (len(atoms) + 1) <= max_cells else None
+
+
+def _replace_observed_atoms(node: Formula, values: Mapping[Atom, bool]) -> Formula:
+    """Substitute observations in a nonconstant NNF tree to obtain a cofactor."""
+    if isinstance(node, AtomLeaf):
+        value = values.get(node.atom)
+        return node if value is None else (TRUE if value else FALSE)
+    if isinstance(node, AndNode):
+        return make_and(
+            _replace_observed_atoms(child, values) for child in node.children
+        )
+    disjunction = cast("OrNode", node)
+    return make_or(
+        _replace_observed_atoms(child, values) for child in disjunction.children
+    )
+
+
+def _cofactor_cover(
+    node: Formula, patterns: AbstractSet[int] | Sequence[int], atoms: Sequence[Atom]
+) -> Formula:
+    """Normalize a cofactor over every observation of its retained domain."""
+    source = _prepare_cover(node)
+    if isinstance(source.tree, BoolConst):
+        return source.tree
+    return _stabilize_cover(source, _project_patterns(patterns, atoms, source.atoms))
+
+
+class _CofactorWitness(NamedTuple):
+    """A shared nonzero membership function and a scalar assignment selecting it."""
+
+    members: int
+    scalar: int
+
+
+def _common_membership_cofactor(
+    source: _CoverInput,
+    axis: _FreeSetAxis,
+    scalar_patterns: AbstractSet[int],
+    member_patterns: Sequence[int],
+) -> _CofactorWitness | None:
+    """Recognize AND separability by comparing every nonzero cofactor."""
+    count = len(member_patterns)
+    truth = _pattern_truth_columns(axis.members, member_patterns)
+    full = (1 << count) - 1
+    selected_members = 0
+    representative_scalar = 0
+    for pattern in scalar_patterns:
+        charge_work(count * (source.leaf_count + len(axis.others) + 1))
+        truth.update(
+            (atom, full if pattern & (1 << index) else 0)
+            for index, atom in enumerate(axis.others)
+        )
+        selected = _eval_mask(source.tree, truth, full)
+        if selected:
+            if selected_members and selected_members != selected:
+                return None
+            selected_members = selected
+            representative_scalar = pattern
+    return _CofactorWitness(selected_members, representative_scalar)
+
+
+def _independent_cover(
+    source: _CoverInput, rows: Sequence[_Row], max_cells: int, store: Memo
+) -> Formula | None:
+    """Factor f(m,s) when every nonzero membership cofactor is the same function."""
+    axis = _free_set_axis(source.atoms, rows)
+    if axis is None:
+        return None
+    scalar_patterns: set[int] = set()
+    if not _extend_row_patterns(
+        axis.others, rows, max_cells, store, start=0, patterns=scalar_patterns
+    ):
+        return None
+    member_patterns = _membership_patterns(axis, len(scalar_patterns), max_cells)
+    if member_patterns is None:
+        return None
+    witness = _common_membership_cofactor(
+        source, axis, scalar_patterns, member_patterns
+    )
+    if witness is None:
+        return None
+    if not witness.members:
+        return FALSE
+    representative_member = member_patterns[
+        (witness.members & -witness.members).bit_length() - 1
+    ]
+    charge_work(2 * (source.leaf_count + len(source.atoms)))
+    member_tree = _replace_observed_atoms(
+        source.tree,
+        {
+            atom: bool(witness.scalar & (1 << index))
+            for index, atom in enumerate(axis.others)
+        },
+    )
+    scalar_tree = _replace_observed_atoms(
+        source.tree,
+        {
+            atom: bool(representative_member & (1 << index))
+            for index, atom in enumerate(axis.members)
+        },
+    )
+    return make_and(
+        (
+            _cofactor_cover(member_tree, member_patterns, axis.members),
+            _cofactor_cover(scalar_tree, scalar_patterns, axis.others),
+        )
+    )
+
+
+def _comparison_member_units(axis: _FreeSetAxis, member_cells: int) -> int:
+    """Reserve tables and lookup masks; recursive evaluation uses the work bound."""
+    member_count, other_count = len(axis.members), len(axis.others)
+    return (
+        _PATTERN_BUFFER_FIXED_UNITS
+        + 4 * (member_count + other_count)
+        + (2 * member_count + 5) * _integer_payload_units(member_cells)
+    )
+
+
+class _ComparisonBuffers(NamedTuple):
+    """Admitted set cells and scalar-column payload allowance for one comparison."""
+
+    member_cells: int
+    scalar_units: int
+
+
+def _comparison_buffers(
+    axis: _FreeSetAxis, max_cells: int
+) -> _ComparisonBuffers | None:
+    """Reserve the free set table and lookup before preparing scalar row columns."""
+    cells = _set_assignment_count(axis.members, max_cells)
+    if cells is None:
+        return None
+    scalar_units = max_cells - _comparison_member_units(axis, cells)
+    return _ComparisonBuffers(cells, scalar_units) if scalar_units >= 0 else None
+
+
+def _independent_rows_equivalent(
+    left: Formula,
+    right: Formula,
+    rows: Sequence[_Row],
+    node_count: int,
+    max_cells: int,
+    store: Memo,
+) -> bool | None:
+    """Compare original formulas on complete independent set and row domains."""
+    atoms = tuple(dict.fromkeys((*collect_atoms(left), *collect_atoms(right))))
+    axis = _free_set_axis(atoms, rows)
+    if axis is None:
+        return None
+    buffers = _comparison_buffers(axis, max_cells)
+    if buffers is None:
+        return None
+    membership: _RowTruth | None = None
+    for row in rows:
+        if isinstance(row.bound, BoolConst) and not row.bound.value:
+            continue
+        columns = _row_pattern_columns(
+            axis.others, row, max_cells, store, max_buffer_units=buffers.scalar_units
+        )
+        if columns is None:
+            return None
+        if not columns.within:
+            continue
+        if membership is None:
+            membership = _row_pattern_columns(
+                axis.members,
+                _Row({}, TRUE),
+                max_cells,
+                store,
+                max_buffer_units=2 * len(axis.members)
+                + (2 * len(axis.members) + 3)
+                * _integer_payload_units(buffers.member_cells),
+            )
+            # A free set axis has exactly the preadmitted powerset of observations.
+            assert membership is not None
+            assert membership.size == buffers.member_cells
+        if not _compare_independent_row(
+            left, right, axis, membership, columns, node_count
+        ):
+            return False
+        del columns
+    return True
+
+
+def _compare_independent_row(
+    left: Formula,
+    right: Formula,
+    axis: _FreeSetAxis,
+    membership: _RowTruth,
+    columns: _RowTruth,
+    node_count: int,
+) -> bool:
+    """Evaluate both original trees for every admitted scalar and set assignment."""
+    charge_work(len(axis.members) + len(axis.others))
+    truth = dict(zip(axis.members, membership.columns, strict=True))
+    full = (1 << membership.size) - 1
+    remaining = columns.within
+    while remaining:
+        charge_work(
+            membership.size * (node_count + len(axis.others) + 1)
+            + columns.size * (len(axis.others) + 1)
+        )
+        point = remaining & -remaining
+        remaining ^= point
+        truth.update(
+            (atom, full if value & point else 0)
+            for atom, value in zip(axis.others, columns.columns, strict=True)
+        )
+        if _eval_mask(left, truth, full) != _eval_mask(right, truth, full):
+            return False
+    return True

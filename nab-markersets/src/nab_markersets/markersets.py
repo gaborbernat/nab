@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 # Resource caps, not semantic parameters: no answer depends on their value, so
 # neither reaches the public surface. `_MAX_CELLS` bounds one decision and
-# `_MAX_WORK` the complete simplification across those decisions.
+# `_MAX_WORK` the complete simplification or row equivalence across those decisions.
 _MAX_CELLS = 100_000
 _MAX_WORK = 100_000_000
 
@@ -344,12 +344,12 @@ class MarkerSet:
         multi-platform universe decidable, where complementing the whole matrix
         at once does not. Use :meth:`equivalent` when the universe is full. An
         empty ``within`` makes every pair equivalent; :meth:`simplify` refuses
-        it instead.
+        it instead. Preparation and comparisons share a bounded work budget.
 
         :raises IntractableMarkerSet: see :meth:`is_empty`.
         """
         return _markersets.equivalent_within_rows(
-            self._tree, other._tree, within._tree, _MAX_CELLS, store
+            self._tree, other._tree, within._tree, _MAX_CELLS, store, max_work=_MAX_WORK
         )
 
     # ---- restriction
@@ -457,7 +457,7 @@ class MarkerSet:
         ...     'python_version >= "3.9" and python_version < "3.12"'
         ... )
         >>> wide.simplify(within=supported).to_marker_string()
-        'python_version == "3.10" or python_version == "3.11"'
+        'python_version >= "3.10"'
 
         :raises ValueError: if ``within`` is the empty set, which makes every set
             vacuously equivalent.

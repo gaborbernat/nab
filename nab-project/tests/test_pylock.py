@@ -615,9 +615,10 @@ class TestWideMatrixFailClosed:
             _finalize_marker(_wide_linux_marker(), _union(_wide_rows()), "foo")
 
 
-class TestFreeMembershipPassthrough:
-    def test_large_membership_sets_ship_raw(self) -> None:
-        rows = [_row(_target(v)) for v in ("3.11", "3.12")]
+class TestFreeMembershipFinalization:
+    def test_independent_membership_sets_simplify(self) -> None:
+        targets = [_target(v) for v in ("3.11", "3.12")]
+        rows = [_row(target) for target in targets]
         within = _union(rows)
         set_a = ("cpu", "cu118", "cu121", "rocm")
         set_b = ("mkl", "openblas", "accelerate", "blis")
@@ -626,14 +627,35 @@ class TestFreeMembershipPassthrough:
         co_members = sorted(
             {*set_a, *set_b, *set_c}.difference(reached),
         )
-        gate = " or ".join(f'"{m}" in extras' for m in reached)
+        membership = " or ".join(f'"{m}" in extras' for m in reached)
         negations = " and ".join(f'"{m}" not in extras' for m in co_members)
         raw = Marker(
             " or ".join(
-                f"({r} and ({gate}) and {negations})"
+                f"({r} and ({membership}) and {negations})"
                 for r in (_row(_target("3.11")), _row(_target("3.12")))
             )
         )
+        result = _finalize_marker(raw, within, "torch")
+        assert result is not None
+        assert len(str(result)) < len(str(raw))
+        assert str(_finalize_marker(result, within, "torch")) == str(result)
+
+        source = MarkerSet.from_marker(str(raw))
+        emitted = MarkerSet.from_marker(str(result))
+        names = sorted({*set_a, *set_b, *set_c})
+        for flags in itertools.product((False, True), repeat=len(names)):
+            extras = {name for name, flag in zip(names, flags, strict=True) if flag}
+            expected = bool(extras.intersection(reached)) and not extras.intersection(
+                co_members
+            )
+            for target in targets:
+                env = {**target.marker_env, "extras": extras}
+                assert source.evaluate(env) == expected
+                assert emitted.evaluate(env) == expected
+
+    def test_intractable_membership_sets_ship_raw(self) -> None:
+        within = _union([_row(_target("3.11")), _row(_target("3.12"))])
+        raw = Marker(" and ".join(f'"n{index}" in extras' for index in range(16)))
         with pytest.raises(IntractableMarkerSet):
             MarkerSet.from_marker(str(raw)).simplify(within=within)
         result = _finalize_marker(raw, within, "torch")
