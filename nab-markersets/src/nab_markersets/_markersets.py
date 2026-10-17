@@ -2234,7 +2234,10 @@ def equivalent_within_rows(
     try:
         left_nodes = _charge_formula_work(left)
         right_nodes = _charge_formula_work(right)
-        _charge_formula_work(universe)
+        if getattr(_work_meter, "remaining", None) is None:
+            _charge_formula_work(universe)
+        else:
+            _charge_universe_work(universe, shared)
         rows = _decompose_rows(universe, shared)
         if all(
             isinstance(row.bound, BoolConst) and not row.bound.value for row in rows
@@ -2478,7 +2481,7 @@ def _charge_formula_work(node: Formula) -> int:
 
 
 def _charge_universe_work(universe: Formula, store: Memo) -> int:
-    """Price a raw universe traversal inside the active simplify meter."""
+    """Price a raw universe traversal inside the active work budget."""
     record = store.row_work
     if record is not None:
         key = universe._key  # noqa: SLF001 - key() can traverse an uncharged tree.

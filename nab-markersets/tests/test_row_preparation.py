@@ -135,6 +135,65 @@ def test_unknown_owned_cost_is_completed_once(monkeypatch: pytest.MonkeyPatch) -
     assert engine._work_meter.remaining == 10_000 - 2 * units
 
 
+def test_equivalence_reuses_the_completed_universe_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    universe = engine.parse('sys_platform == "linux" or sys_platform == "win32"')
+    store = engine.Memo()
+    monkeypatch.setattr(engine._work_meter, "remaining", 10_000, raising=False)
+    units = engine._charge_universe_work(universe, store)
+    rows = engine._decompose_rows(universe, store, raw_work=units)
+    calls = _walks(monkeypatch)
+    comparison_units = units + 2 + len(rows)
+    engine._work_meter.remaining = comparison_units
+
+    assert engine.equivalent_within_rows(
+        engine.TRUE, engine.TRUE, universe, 100_000, store
+    )
+    assert engine._work_meter.remaining == 0
+    assert calls == [engine.TRUE, engine.TRUE]
+
+    engine._work_meter.remaining = comparison_units - 1
+    with pytest.raises(engine.IntractableMarkerSet, match="work exceeds"):
+        engine.equivalent_within_rows(
+            engine.TRUE, engine.TRUE, universe, 100_000, store
+        )
+    assert engine._work_meter.remaining == -1
+    assert calls == [engine.TRUE] * 4
+
+    record = store.row_work
+    engine._work_meter.remaining = 2
+    with pytest.raises(engine.IntractableMarkerSet, match="work exceeds"):
+        engine.equivalent_within_rows(
+            engine.TRUE, engine.TRUE, universe, 100_000, store
+        )
+    assert engine._work_meter.remaining == -units
+    assert store.row_work is record
+    assert calls == [engine.TRUE] * 6
+
+
+@pytest.mark.parametrize("preowned", [False, True])
+def test_unmetered_equivalence_preserves_completed_and_missing_costs(
+    monkeypatch: pytest.MonkeyPatch, *, preowned: bool
+) -> None:
+    universe = engine.parse('sys_platform == "linux" or sys_platform == "win32"')
+    store = engine.Memo()
+    expected_units = None
+    if preowned:
+        monkeypatch.setattr(engine._work_meter, "remaining", 10_000, raising=False)
+        units = engine._charge_universe_work(universe, store)
+        expected_units = units
+        engine._decompose_rows(universe, store, raw_work=units)
+    monkeypatch.setattr(engine._work_meter, "remaining", None, raising=False)
+
+    assert engine.equivalent_within_rows(
+        engine.TRUE, engine.TRUE, universe, 100_000, store
+    )
+    assert engine._work_meter.remaining is None
+    assert store.row_work is not None
+    assert store.row_work.units == expected_units
+
+
 def test_equal_distinct_and_older_keys_are_conservative_misses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
