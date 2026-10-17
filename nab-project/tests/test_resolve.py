@@ -54,6 +54,7 @@ from nab_project.resolve import (
     build_resolver_inputs,
     inputs_for_build_requirements,
     resolve_for_targets,
+    resolve_with_coordinator,
 )
 from nab_provider._provider import listing_diagnosis
 from nab_provider._vendor.packaging.markers import Marker, default_environment
@@ -2443,15 +2444,10 @@ class TestResolveUniversalPyproject:
             )
         mock_universal.assert_not_called()
 
-    @patch("nab_project.resolve.resolve_with_coordinator")
     def test_umbrella_extra_disjoint_micro_markers_resolve(
-        self, mock_engine: MagicMock, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
-        """Self-refs split at the same micro reach one member per slice.
-
-        cpu below 3.10.4 and gpu from 3.10.4 up never meet on one
-        interpreter, so splitting the minor must not turn into a refusal.
-        """
+        """Disjoint self-references select one conflicting extra per micro slice."""
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(
             '[project]\nname = "x"\ndependencies = ["base"]\n'
@@ -2469,18 +2465,53 @@ class TestResolveUniversalPyproject:
             'python = "==3.10"\n'
             'platforms = ["linux_x86_64"]\n'
         )
-        _resolved(
-            pyproject,
-            extras=["all"],
-            inputs=ResolveInputs(
-                build_policy=BuildPolicy.NEVER,
-                conflicts=(_extras_conflict("cpu", "gpu"),),
-            ),
-            targets=Matrix(
-                python="==3.10", platforms=(PlatformSpec("linux_x86_64"),)
-            ).expand(),
+        coordinator = make_coordinator(
+            listings={
+                "base": _index_wheels("base", "1.0"),
+                "foo": _index_wheels("foo", "1.0", "2.0"),
+            },
+            auto_metadata=True,
         )
-        mock_engine.assert_called_once()
+        with (
+            patch(
+                "nab_project.resolve.FetchCoordinator",
+                return_value=nullcontext(coordinator),
+            ),
+            patch(
+                "nab_project.resolve.resolve_with_coordinator",
+                wraps=resolve_with_coordinator,
+            ) as engine_spy,
+        ):
+            result = _resolved(
+                pyproject,
+                extras=["all"],
+                inputs=ResolveInputs(
+                    build_policy=BuildPolicy.NEVER,
+                    conflicts=(_extras_conflict("cpu", "gpu"),),
+                ),
+                targets=Matrix(
+                    python="==3.10", platforms=(PlatformSpec("linux_x86_64"),)
+                ).expand(),
+            )
+        engine_spy.assert_called_once()
+
+        expected_pins = {
+            "3.10.0": {"base": V("1.0"), "foo": V("1.0")},
+            "3.10.4": {"base": V("1.0"), "foo": V("2.0")},
+        }
+        assert len(result.target_results) == 2
+        assert {
+            tr.target.marker_env["python_full_version"]: tr.pins
+            for tr in result.target_results
+        } == expected_pins
+
+        for tr in result.target_results:
+            lock = tr.lock
+            assert lock is not None
+            expected = expected_pins[tr.target.marker_env["python_full_version"]]
+            assert {name: pin.version for name, pin in lock.pins.items()} == {
+                name: str(version) for name, version in expected.items()
+            }
 
     @patch("nab_project.resolve.resolve_with_coordinator")
     def test_untileable_self_ref_marker_off_the_matrix_resolves(
