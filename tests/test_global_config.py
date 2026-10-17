@@ -361,6 +361,7 @@ def test_locked_remedy_replays_external_source_selection(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.chdir(hermetic_roots)
     project = hermetic_roots / "pyproject.toml"
     document = '[project]\nname="root"\nversion="1"\ndependencies=[]\n'
     document += (
@@ -373,7 +374,7 @@ def test_locked_remedy_replays_external_source_selection(
     monkeypatch.setenv(name, "0")
     output = hermetic_roots / "pylock.toml"
     with pytest.raises(SystemExit) as raised:
-        main(["lock", str(project), "--locked", "--offline", "--output", str(output)])
+        main(["lock", "--locked", "--offline"])
     assert raised.value.code == 1
     error = capsys.readouterr().err
     remedy = error.split("run `", 1)[1].split("` first.", 1)[0]
@@ -657,6 +658,7 @@ def test_enforced_git_block_refuses_an_offline_cached_clone(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     no_network: NoNetwork,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     repository = hermetic_roots / "upstream"
     repository.mkdir()
@@ -690,7 +692,7 @@ def test_enforced_git_block_refuses_an_offline_cached_clone(
         str(project),
         "--offline",
         "--cache-dir",
-        str(hermetic_roots / "cache"),
+        str(tmp_path_factory.mktemp("vcs")),
         "--output",
         str(output),
     ]
