@@ -239,7 +239,7 @@ def test_empty_rows_do_not_allocate_a_membership_powerset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[int] = []
-    original = engine._cell_truth_masks
+    original = engine._compile_cell_truth_masks
 
     def columns(
         space: engine._CellSpace, size: int
@@ -247,7 +247,7 @@ def test_empty_rows_do_not_allocate_a_membership_powerset(
         calls.append(size)
         return original(space, size)
 
-    monkeypatch.setattr(engine, "_cell_truth_masks", columns)
+    monkeypatch.setattr(engine, "_compile_cell_truth_masks", columns)
     source = engine.parse('"a" in extras')
     assert engine.equivalent_within_rows(
         source, engine.FALSE, engine.FALSE, 100_000, max_work=100_000
@@ -292,7 +292,7 @@ def test_combined_table_allowance_declines_before_mask_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[int] = []
-    original = engine._cell_truth_masks
+    original = engine._compile_cell_truth_masks
 
     def columns(
         space: engine._CellSpace, size: int
@@ -300,7 +300,7 @@ def test_combined_table_allowance_declines_before_mask_construction(
         calls.append(size)
         return original(space, size)
 
-    monkeypatch.setattr(engine, "_cell_truth_masks", columns)
+    monkeypatch.setattr(engine, "_compile_cell_truth_masks", columns)
     source = engine.parse('"a" in extras')
     assert (
         engine._independent_rows_equivalent(
@@ -369,7 +369,7 @@ def test_bound_only_columns_are_reserved_before_truth_compilation(
     axis = engine._free_set_axis(engine.collect_atoms(source), rows)
     assert axis is not None
     calls: list[int] = []
-    original = engine._cell_truth_masks
+    original = engine._compile_cell_truth_masks
 
     def compile_columns(
         space: engine._CellSpace, size: int
@@ -388,7 +388,7 @@ def test_bound_only_columns_are_reserved_before_truth_compilation(
     required = 2 * len(predicates) + (
         len(predicates) + 3
     ) * engine._integer_payload_units(size)
-    monkeypatch.setattr(engine, "_cell_truth_masks", compile_columns)
+    monkeypatch.setattr(engine, "_compile_cell_truth_masks", compile_columns)
     assert (
         engine._row_pattern_columns(
             (), rows[0], 100_000, store, max_buffer_units=required - 1
