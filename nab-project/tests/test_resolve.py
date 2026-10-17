@@ -996,40 +996,49 @@ class TestResolvePyproject:
         routes = mock_coord_cls.call_args.kwargs["index_routes"]
         assert [(r.name, r.index) for r in routes] == [("baz", "private")]
 
-    def test_arbitrary_equality_dep_passed_through(self, tmp_path: Path) -> None:
-        """``===`` deps reach the resolver as literal-only ranges.
-
-        Unlike PEP 440 specifiers, ``===`` cannot match any
-        ``Version``, so a real resolve would fail to find candidates.
-        The mocked ``Resolver.resolve`` here returns a canned answer,
-        so we just check that the requirement is forwarded rather than
-        silently dropped.
-        """
+    def test_arbitrary_equality_dep_rejects_nonmatching_version(
+        self, tmp_path: Path
+    ) -> None:
+        """A nonmatching ``===`` root reaches the solver and rejects resolution."""
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(
             '[project]\ndependencies = ["foo===custom", "bar>=1.0"]\n',
         )
 
+        coordinator = graph_port(
+            (
+                ("foo", "1.0", False, ()),
+                ("bar", "1.0", False, ()),
+            )
+        )
         with (
-            patch("nab_project._resolve.engine.Resolver") as mock_resolver_cls,
-            patch("nab_project.resolve.FetchCoordinator") as mock_coord_cls,
-            patch("nab_project._resolve.engine.Provider"),
-            patch("nab_project._resolve.engine.build_target_lock"),
+            patch(
+                "nab_project.resolve.FetchCoordinator",
+                return_value=nullcontext(coordinator),
+            ),
+            patch.object(
+                Resolver, "resolve", autospec=True, side_effect=Resolver.resolve
+            ) as solver_resolve,
         ):
-            mock_coord_cls.return_value.__enter__ = lambda s: s
-            mock_coord_cls.return_value.__exit__ = MagicMock(return_value=False)
-            mock_resolver = mock_resolver_cls.return_value
-            mock_resolver.resolve.return_value = {
-                "foo": V("1.0"),
-                "bar": V("1.0"),
-            }
-            _resolved(pyproject, _FAKE_TRANSPORT, python_version="3.12.0")
+            result = resolve_for_targets(
+                pyproject,
+                _FAKE_TRANSPORT,
+                targets=(ResolveTarget.for_host_python("3.12.0"),),
+            )
 
-        forwarded = _root_ranges(mock_resolver)
+        forwarded = {
+            root.package: root.constraint for root in solver_resolve.call_args.args[1]
+        }
         assert "foo" in forwarded
         assert "bar" in forwarded
         assert "custom" in forwarded["foo"]
         assert V("1.0") not in forwarded["foo"]
+
+        assert not result.success
+        assert _pins(result) == {}
+        assert result.target_results[0].lock is None
+        with pytest.raises(ResolutionError):
+            result.raise_for_failure()
 
     def test_empty_dependencies(self, tmp_path: Path) -> None:
         """Project with no dependencies resolves to empty dict."""
