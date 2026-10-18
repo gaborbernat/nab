@@ -12,7 +12,7 @@ from nab_markersets.errors import IntractableMarkerSet
 from nab_markersets.markersets import DecisionStore, MarkerSet
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
 
 _VARIABLES = ("sys_platform", "os_name", "platform_machine")
@@ -397,24 +397,38 @@ def test_work_limit_precedes_normalization_and_large_child_stack(
     source = MarkerSet.from_marker('os_name == "posix"')
     within = MarkerSet.from_marker(" and ".join(['os_name == "posix"'] * 1000))
     original = engine.to_nnf
-    atom_key = engine._atom_key
+    charge = engine.charge_work
     normalized = []
-    visited = []
+    charges = []
+    iterated = []
 
-    def record_atom_key(atom: engine.Atom) -> engine.AtomKey:
-        visited.append(atom)
-        return atom_key(atom)
+    class TrackedChildren(tuple):
+        """Observe when the real child sequence is copied into the work stack."""
+
+        __slots__ = ()
+
+        def __iter__(self) -> Iterator[engine.Formula]:
+            iterated.append(True)
+            return super().__iter__()
+
+    assert isinstance(within._tree, engine.AndNode)
+    within = MarkerSet._wrap(engine.AndNode(TrackedChildren(within._tree.children)))
+
+    def record_charge(units: int) -> None:
+        charges.append(units)
+        charge(units)
 
     def record_normalization(node: engine.Formula) -> engine.Formula:
         normalized.append(node)
         return original(node)
 
     monkeypatch.setattr(engine, "to_nnf", record_normalization)
-    monkeypatch.setattr(engine, "_atom_key", record_atom_key)
+    monkeypatch.setattr(engine, "charge_work", record_charge)
     monkeypatch.setattr(engine._work_meter, "remaining", 777, raising=False)
     with pytest.raises(IntractableMarkerSet, match="work exceeds"):
         engine.simplify_within(source._tree, within._tree, 100_000, 50)
 
     assert not normalized
-    assert visited == engine.collect_atoms(source._tree)
+    assert charges == [1, 26, 1, 1000]
+    assert not iterated
     assert engine._work_meter.remaining == 777

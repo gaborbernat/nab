@@ -328,3 +328,77 @@ def test_constant_sources_still_precharge_an_uncached_universe(
     assert store.rows == {}
     assert store.row_work is None
     assert engine._work_meter.remaining is None
+
+
+def _check_raw_work_budget(
+    monkeypatch: pytest.MonkeyPatch, node: engine.Formula, units: int, nodes: int
+) -> None:
+    """Check the exact successful and exhausted budget for one raw formula."""
+    monkeypatch.setattr(engine._work_meter, "remaining", units, raising=False)
+    assert engine._charge_formula_work(node) == nodes
+    assert engine._work_meter.remaining == 0
+
+    engine._work_meter.remaining = units - 1
+    with pytest.raises(engine.IntractableMarkerSet, match="work exceeds"):
+        engine._charge_formula_work(node)
+    assert engine._work_meter.remaining == -1
+
+
+@pytest.mark.parametrize(
+    ("text", "units"),
+    [
+        ('sys_platform == "linux"', 37),
+        ('"linux" == sys_platform', 37),
+        ('python_version == "3.10"', 45),
+        ('"café" in extras', 22),
+        ('"café" not in extras', 26),
+    ],
+)
+def test_raw_work_prices_declared_text(
+    monkeypatch: pytest.MonkeyPatch, text: str, units: int
+) -> None:
+    _check_raw_work_budget(monkeypatch, engine.parse(text), units, 1)
+
+
+@pytest.mark.parametrize(
+    ("repeat", "negate", "units", "nodes"),
+    [
+        pytest.param(False, True, 38, 2, id="negated"),
+        pytest.param(True, False, 77, 3, id="repeated"),
+        pytest.param(True, True, 78, 4, id="negated-repeated"),
+    ],
+)
+def test_raw_work_prices_repeated_and_negated_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+    units: int,
+    nodes: int,
+    *,
+    repeat: bool,
+    negate: bool,
+) -> None:
+    leaf = engine.parse('sys_platform == "linux"')
+    node = engine.AndNode((leaf, leaf)) if repeat else leaf
+    if negate:
+        node = engine.NotNode(node)
+    _check_raw_work_budget(monkeypatch, node, units, nodes)
+
+
+def test_raw_work_does_not_build_atom_ordering_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaf = engine.parse('sys_platform == "linux"')
+    node = engine.AndNode((leaf, engine.NotNode(leaf)))
+    original = engine._atom_key
+    calls: list[engine.Atom] = []
+
+    def recorded(atom: engine.Atom) -> engine.AtomKey:
+        calls.append(atom)
+        return original(atom)
+
+    monkeypatch.setattr(engine, "_atom_key", recorded)
+    monkeypatch.setattr(engine._work_meter, "remaining", 78, raising=False)
+
+    assert engine._charge_formula_work(node) == 4
+    assert engine._work_meter.remaining == 0
+
+    assert calls == []

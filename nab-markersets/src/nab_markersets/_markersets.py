@@ -2465,12 +2465,13 @@ def _charge_formula_work(node: Formula) -> int:
         current = pending.pop()
         nodes += 1
         if isinstance(current, AtomLeaf):
+            atom = current.atom
             charge_work(
-                sum(
-                    len(value)
-                    for value in _atom_key(current.atom)
-                    if isinstance(value, str)
-                )
+                len(atom.origin)
+                + len(atom.op)
+                + len(atom.literal)
+                + len(atom.kind)
+                + len(atom.variable)
             )
         elif isinstance(current, NotNode):
             pending.append(current.child)
