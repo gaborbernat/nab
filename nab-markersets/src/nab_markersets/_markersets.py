@@ -1351,13 +1351,19 @@ def _partition_axis(
     return partition_boolean_axis(atoms, max_cells, memo)
 
 
-# Thread-local work is shared by simplification or bounded row equivalence.
-_work_meter = threading.local()
+class _WorkMeter(threading.local):
+    """Per-thread remaining logical work, or None for unmetered operations."""
+
+    # Slots on threading.local subclasses would share this field between threads.
+    remaining: int | None = None
+
+
+_work_meter = _WorkMeter()
 
 
 def charge_work(units: int) -> None:
     """Charge logical work to the current bounded operation, if any."""
-    remaining = getattr(_work_meter, "remaining", None)
+    remaining = _work_meter.remaining
     if remaining is None:
         return
     remaining -= units
@@ -2228,13 +2234,13 @@ def equivalent_within_rows(
 ) -> bool:
     """Compare original trees per row, sharing an existing work budget if present."""
     shared = Memo() if store is None else store
-    previous_work = getattr(_work_meter, "remaining", None)
+    previous_work = _work_meter.remaining
     if previous_work is None:
         _work_meter.remaining = max_work
     try:
         left_nodes = _charge_formula_work(left)
         right_nodes = _charge_formula_work(right)
-        if getattr(_work_meter, "remaining", None) is None:
+        if _work_meter.remaining is None:
             _charge_formula_work(universe)
         else:
             _charge_universe_work(universe, shared)
@@ -2433,10 +2439,8 @@ def _replace_cover_atoms(node: Formula, replacements: Mapping[Atom, Atom]) -> Fo
         return make_and(
             _replace_cover_atoms(child, replacements) for child in node.children
         )
-    disjunction = cast("OrNode", node)
-    return make_or(
-        _replace_cover_atoms(child, replacements) for child in disjunction.children
-    )
+    assert isinstance(node, OrNode)
+    return make_or(_replace_cover_atoms(child, replacements) for child in node.children)
 
 
 def _prepare_cover(node: Formula) -> _CoverInput:
@@ -2490,8 +2494,11 @@ def _charge_universe_work(universe: Formula, store: Memo) -> int:
             charge_work(record.units)
             return record.units
     before = _work_meter.remaining
+    assert before is not None
     _charge_formula_work(universe)
-    return cast("int", before - _work_meter.remaining)
+    after = _work_meter.remaining
+    assert after is not None
+    return before - after
 
 
 def _fixed_row_pattern(
@@ -2512,7 +2519,8 @@ def _fixed_row_pattern(
             make_and(AtomLeaf(atom) for atom in partition_atoms), max_cells, store
         )
     except IntractableMarkerSet:
-        if _work_meter.remaining < 0:
+        remaining = _work_meter.remaining
+        if remaining is not None and remaining < 0:
             raise
         return _RowStatus.OVER_CAP
     count = prod(map(len, space.partitions))
@@ -2747,7 +2755,8 @@ def _row_pattern_columns(
             make_and(AtomLeaf(atom) for atom in partition_atoms), max_cells, store
         )
     except IntractableMarkerSet:
-        if (getattr(_work_meter, "remaining", None) or 0) < 0:
+        remaining = _work_meter.remaining
+        if remaining is not None and remaining < 0:
             raise
         return None
     count = prod(map(len, space.partitions))
@@ -2919,7 +2928,7 @@ def simplify_within(
     ``max_work`` covers the direct attempt and greedy fallback together.
     """
     shared = Memo() if store is None else store
-    previous_work = getattr(_work_meter, "remaining", None)
+    previous_work = _work_meter.remaining
     _work_meter.remaining = max_work
     try:
         _charge_formula_work(node)
@@ -3060,10 +3069,8 @@ def _replace_observed_atoms(node: Formula, values: Mapping[Atom, bool]) -> Formu
         return make_and(
             _replace_observed_atoms(child, values) for child in node.children
         )
-    disjunction = cast("OrNode", node)
-    return make_or(
-        _replace_observed_atoms(child, values) for child in disjunction.children
-    )
+    assert isinstance(node, OrNode)
+    return make_or(_replace_observed_atoms(child, values) for child in node.children)
 
 
 def _cofactor_cover(

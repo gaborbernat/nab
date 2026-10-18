@@ -10,7 +10,18 @@ import pytest
 from nab_markersets import _markersets as engine
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping, Sequence
+
+    RowComparison = Callable[
+        [
+            engine.Formula,
+            Sequence[engine._Row],
+            Sequence[engine.Formula],
+            int,
+            engine.Memo,
+        ],
+        bool,
+    ]
 
 
 def _row_walks(
@@ -266,10 +277,10 @@ def test_string_subclasses_keep_their_conversion_semantics() -> None:
 
 
 @pytest.mark.parametrize(
-    "operation", ["_rows_equivalent", "_rows_within", "_rows_cover"]
+    "operation", [engine._rows_equivalent, engine._rows_within, engine._rows_cover]
 )
 def test_row_comparisons_use_the_shared_string_truths(
-    monkeypatch: pytest.MonkeyPatch, operation: str
+    monkeypatch: pytest.MonkeyPatch, operation: RowComparison
 ) -> None:
     store = engine.Memo()
     source = engine.parse('sys_platform == "linux"')
@@ -277,7 +288,7 @@ def test_row_comparisons_use_the_shared_string_truths(
     calls = _row_walks(monkeypatch)
 
     monkeypatch.setattr(engine._work_meter, "remaining", 100_000, raising=False)
-    assert getattr(engine, operation)(source, [row], [engine.TRUE], 1000, store)
+    assert operation(source, [row], [engine.TRUE], 1000, store)
     assert calls == [(source, store)]
 
 
