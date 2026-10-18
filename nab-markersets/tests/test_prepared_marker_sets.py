@@ -334,11 +334,14 @@ def test_handoff_matches_fresh_factory_over_distinct_environments(
         assert converted.equivalent(prepared)
 
 
-@pytest.mark.parametrize("method", ["prepare", "convert"])
-def test_absent_marker_is_left_to_the_callers_domain(method: str) -> None:
-    owner = PreparedMarkerSets()
+def test_preparation_rejects_an_absent_marker() -> None:
     with pytest.raises(TypeError):
-        getattr(owner, method)(None)
+        PreparedMarkerSets().prepare(None)  # type: ignore[arg-type] - exercise rejected input.
+
+
+def test_conversion_rejects_an_absent_marker() -> None:
+    with pytest.raises(TypeError):
+        PreparedMarkerSets().convert(None)  # type: ignore[arg-type] - exercise rejected input.
 
 
 def test_handoff_works_with_released_packaging_without_provider() -> None:
